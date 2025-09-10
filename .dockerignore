@@ -1,5 +1,7 @@
 node_modules
-npm-debug.log
-baileys_auth/*
-!baileys_auth/.gitkeep
+baileys_auth
 .git
+Dockerfile
+docker-compose.yml
+README.md
+*.log

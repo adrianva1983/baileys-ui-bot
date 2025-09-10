@@ -24,7 +24,7 @@ if (preg_match('~^/ping\b~i', $text)) {
 } else {
   $reply = $isGroup
     ? "($groupName) $pushName: $text"
-    : "Has dicho: $text";
+    : "Soy un bot y has dicho: $text";
 }
 
 echo json_encode(['ok' => true, 'text' => $reply], JSON_UNESCAPED_UNICODE);

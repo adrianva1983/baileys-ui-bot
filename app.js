@@ -12,6 +12,9 @@ const __dirname = path.dirname(__filename)
 const SEND_RATE_MS = Number(process.env.SEND_RATE_MS || 800)
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
+// 🔐 Carpeta de credenciales (una sola verdad)
+const AUTH_DIR = path.resolve(process.env.AUTH_DIR || path.join(__dirname, "baileys_auth"))
+console.log("[Auth]", AUTH_DIR)
 
 let sock = null
 let connectPromise = null
@@ -135,9 +138,9 @@ function summarizeMessage(msg) {
 
 // Llama a tu endpoint PHP y devuelve un texto para responder (POST normal)
 async function getReplyFromPHP({ fromNumber, text, jid }) {
-  const PHP_ENDPOINT = "http://php/chat-bot/index.php"; // o /chat-bot/index.php
-  const SECRET = "cambia-este-secreto";
-  const form = new URLSearchParams({ secret: SECRET, fromNumber, text, jid });
+  const PHP_ENDPOINT = "http://php/chat-bot/index.php" // o /chat-bot/index.php
+  const SECRET = "cambia-este-secreto"
+  const form = new URLSearchParams({ secret: SECRET, fromNumber, text, jid })
 
   async function once(url = PHP_ENDPOINT) {
     const res = await fetch(url, {
@@ -145,39 +148,35 @@ async function getReplyFromPHP({ fromNumber, text, jid }) {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Accept": "application/json",
-        "Connection": "close",           // 👈 evita reusar sockets que Apache ya cerró
+        "Connection": "close", // evita reusar sockets que Apache ya cerró
       },
       body: form.toString(),
-    });
+    })
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`PHP ${res.status} ${res.statusText} :: ${body}`);
+      const body = await res.text().catch(() => "")
+      throw new Error(`PHP ${res.status} ${res.statusText} :: ${body}`)
     }
-    const data = await res.json().catch(() => ({}));
-    const replyText = data?.text || "";
-    if (!replyText) throw new Error("PHP no devolvió 'text'");
-    return replyText;
+    const data = await res.json().catch(() => ({}))
+    const replyText = data?.text || ""
+    if (!replyText) throw new Error("PHP no devolvió 'text'")
+    return replyText
   }
 
   try {
-    return await once();
+    return await once()
   } catch (e) {
-    // Reintento limpio si fue un cierre/abort del socket
     if (e?.name === "AbortError" || /aborted|ECONNRESET|socket hang up/i.test(String(e))) {
-      return await once(`${PHP_ENDPOINT}?_=${Date.now()}`);
+      return await once(`${PHP_ENDPOINT}?_=${Date.now()}`)
     }
-    throw e;
+    throw e
   }
 }
-
-
-
 
 // ---------- Conexión ----------
 async function connectToWhatsApp() {
   if (connectPromise) return connectPromise
   connectPromise = (async () => {
-    const { state, saveCreds } = await useMultiFileAuthState("baileys_auth")
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
     sock = makeWASocket({ auth: state })
 
     // Mensajes entrantes → consola y SSE (NO leídos)
@@ -190,33 +189,28 @@ async function connectToWhatsApp() {
         const summary = summarizeMessage(msg)
 
         // 👉 Si es grupo: solo aviso por consola y salgo
-        if (summary.chatType === "group") 
-        {
-            const gid = summary.group?.id || jidToNumber(msg.key.remoteJid || "")
-            console.log(`📣 Mensaje de GRUPO ignorado (ID: ${gid})`)
-            return
+        if (summary.chatType === "group") {
+          const gid = summary.group?.id || jidToNumber(msg.key.remoteJid || "")
+          console.log(`📣 Mensaje de GRUPO ignorado (ID: ${gid})`)
+          return
         }
 
-        if (summary.chatType === "private")
-        {
-            console.dir(summary, { depth: null, colors: true });
-            if (summary.from?.number === "34644550262")
-            //if (summary.from?.number === "34647199890")
-            {
-                // Llamada a tu PHP (⚠️ asegúrate de haber definido PHP_ENDPOINT)
-                const replyText = await getReplyFromPHP({
-                    fromNumber: summary.from.number,
-                    text: summary.text || "",
-                    jid: numberToJid(summary.from.number),
-                    raw: summary,
-                })
+        if (summary.chatType === "private") {
+          console.dir(summary, { depth: null, colors: true })
+          //if (summary.from?.number === "34644550262") {
+            // Llamada a tu PHP (⚠️ asegúrate de haber definido PHP_ENDPOINT)
+            const replyText = await getReplyFromPHP({
+              fromNumber: summary.from.number,
+              text: summary.text || "",
+              jid: numberToJid(summary.from.number),
+              raw: summary,
+            })
 
-                // Enviar la respuesta devuelta por PHP
-                await sock.sendMessage(numberToJid(summary.from.number), { text: replyText })
-                console.log("↩️ Respuesta enviada:", replyText)
-            }
+            // Enviar la respuesta devuelta por PHP
+            await sock.sendMessage(numberToJid(summary.from.number), { text: replyText })
+            console.log("↩️ Respuesta enviada:", replyText)
+          //}
         }
-        
 
         // envía a la UI (último mensaje)
         const payload = {
@@ -316,29 +310,28 @@ app.use(express.static(path.join(__dirname, "public")))
 app.use(express.json())
 
 const sseClients = new Set()
-// reemplaza tu app.get("/qr-events", ...) por esto
+
 app.get("/qr-events", async (req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no"
-  });
-  res.write("retry: 5000\n\n"); // si se corta, reintenta en 5s
+  })
+  res.write("retry: 5000\n\n") // si se corta, reintenta en 5s
 
-  sseClients.add(res);
-  req.on("close", () => { clearInterval(ka); sseClients.delete(res); });
+  sseClients.add(res)
+  req.on("close", () => { clearInterval(ka); sseClients.delete(res) })
 
   // estado inicial
-  sendSSE(res);
+  sendSSE(res)
 
   // ping/keep-alive
   const ka = setInterval(() => {
-    try { res.write(`event: ping\ndata: ${Date.now()}\n\n`); }
-    catch { clearInterval(ka); sseClients.delete(res); }
-  }, 15000);
-});
-
+    try { res.write(`event: ping\ndata: ${Date.now()}\n\n`) }
+    catch { clearInterval(ka); sseClients.delete(res) }
+  }, 15000)
+})
 
 function sendSSE(res) {
   res.write(`event: update\ndata: ${JSON.stringify({ latestQR, connectionStatus, lastError, meId, meName })}\n\n`)
@@ -375,19 +368,14 @@ async function sendBatchFromArray(items = []) {
   for (const item of items) {
     try {
       if (!item?.to) throw new Error("Falta 'to'")
-      const jid = numberToJid(item.to) // <— usa tu helper
+      const jid = numberToJid(item.to)
       if (!jid) throw new Error("Número inválido")
 
-      // para el demo, texto simple; si pasas template:"hipotea" ya tienes ese bloque arriba
       const payload = item.template === "hipotea"
-        ? { text: `Hola ${item.nombre || "Cliente"} — ${item.url || ""}` }  // o tu plantilla real
+        ? { text: `Hola ${item.nombre || "Cliente"} — ${item.url || ""}` } // o tu plantilla real
         : { text: String(item.text || "Mensaje de prueba ✅") }
 
       await sock.sendMessage(jid, payload)
-
-      // si envías expedienteId y tienes dedupe, márcalo aquí (tu demo no lo usa)
-      // if (item.expedienteId) markAsSent(item.expedienteId, { jid, telefono: item.to })
-
       console.log(`[BATCH] OK -> ${jid}`)
       results.push({ to: item.to, ok: true })
     } catch (e) {
@@ -402,27 +390,27 @@ async function sendBatchFromArray(items = []) {
 // POST /send-batch  con body: { items: [ ... ] }
 app.post("/send-batch", async (req, res) => {
   try {
-    const { items } = req.body || {};
-    if (!Array.isArray(items)) return res.status(400).json({ ok: false, error: "Body debe incluir 'items' (array)" });
-    const r = await sendBatchFromArray(items);
-    res.json(r);
+    const { items } = req.body || {}
+    if (!Array.isArray(items)) return res.status(400).json({ ok: false, error: "Body debe incluir 'items' (array)" })
+    const r = await sendBatchFromArray(items)
+    res.json(r)
   } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || "send-batch failed" });
+    res.status(500).json({ ok: false, error: e?.message || "send-batch failed" })
   }
-});
+})
 
 // GET /send-batch-demo -> ejemplo
 app.get("/send-batch-demo", async (_req, res) => {
   try {
     const demo = [
       { to: "34644550262", text: "Mensaje de prueba ✅" }
-    ];
-    const r = await sendBatchFromArray(demo);
-    res.json(r);
+    ]
+    const r = await sendBatchFromArray(demo)
+    res.json(r)
   } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || "demo failed" });
+    res.status(500).json({ ok: false, error: e?.message || "demo failed" })
   }
-});
+})
 
 // ---------- Logout en caliente (sin tumbar Node) ----------
 async function safeDisconnect() {
@@ -430,21 +418,34 @@ async function safeDisconnect() {
     connectionStatus = "logging-out"
     broadcastSSE()
 
+    // 1) corta listeners y socket
+    try { sock?.ev?.removeAllListeners?.() } catch {}
     try { await sock?.logout?.() } catch {}
     try { sock?.end?.(true) } catch {}
     sock = null
+    connectPromise = null
 
-    try { fs.rmSync(path.join(__dirname, "baileys_auth"), { recursive: true, force: true }) } catch (e) {
-      console.warn("No se pudo borrar baileys_auth:", e.message)
+    // 2) pequeña pausa para liberar handles
+    await new Promise(r => setTimeout(r, 200))
+
+    // 3) borra y recrea la carpeta REAL de credenciales
+    try {
+      await fs.promises.rm(AUTH_DIR, { recursive: true, force: true })
+      await fs.promises.mkdir(AUTH_DIR, { recursive: true })
+      console.log("[Auth] limpiada:", AUTH_DIR)
+    } catch (e) {
+      console.warn("[Auth] no se pudo limpiar:", e?.message || e)
     }
 
+    // 4) resetea estado UI
     latestQR = null
     meId = null
     meName = null
     connectionStatus = "logged-out"
     broadcastSSE()
 
-    await connectToWhatsApp() // pedirá nuevo QR
+    // 5) reconecta (pedirá QR nuevo)
+    await connectToWhatsApp()
     return { ok: true }
   } catch (e) {
     lastError = e?.message || String(e)
@@ -458,6 +459,13 @@ app.post("/logout", async (_req, res) => {
   const r = await safeDisconnect()
   if (r.ok) res.status(200).json({ ok: true, msg: "Sesión cerrada. Generando nuevo QR..." })
   else res.status(500).json(r)
+})
+
+// (Opcional) Diagnóstico de ruta real de credenciales
+app.get("/auth-path", async (_req, res) => {
+  let exists = false, files = []
+  try { exists = fs.existsSync(AUTH_DIR); files = exists ? fs.readdirSync(AUTH_DIR) : [] } catch {}
+  res.json({ AUTH_DIR, exists, files })
 })
 
 // Raíz
