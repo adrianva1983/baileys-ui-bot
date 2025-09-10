@@ -399,6 +399,17 @@ async function sendBatchFromArray(items = []) {
   return { ok: true, total: items.length, results }
 }
 
+// POST /send-batch  con body: { items: [ ... ] }
+app.post("/send-batch", async (req, res) => {
+  try {
+    const { items } = req.body || {};
+    if (!Array.isArray(items)) return res.status(400).json({ ok: false, error: "Body debe incluir 'items' (array)" });
+    const r = await sendBatchFromArray(items);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || "send-batch failed" });
+  }
+});
 
 // GET /send-batch-demo -> ejemplo
 app.get("/send-batch-demo", async (_req, res) => {
