@@ -1,0 +1,38 @@
+services:
+  php:
+    image: php:8.2-apache
+    container_name: php-bot-backend
+    volumes:
+      - ./php:/var/www/html
+    # Opcional: expón a tu host para depurar en http://localhost:8080
+    ports:
+      - "8080:80"
+    environment:
+      - APACHE_DOCUMENT_ROOT=/var/www/html
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/health.php || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      target: dev             # cambia a 'prod' en producción
+    container_name: baileys-ui-bot
+    environment:
+      - TZ=Europe/Madrid
+      # Lo importante: el bot hablará con el servicio 'php'
+      - PHP_ENDPOINT=http://php/chat-bot/index.php
+      - PHP_TIMEOUT_MS=8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./app.js:/usr/src/app/app.js
+      - ./public:/usr/src/app/public
+      - ./baileys_auth:/usr/src/app/baileys_auth
+    depends_on:
+      php:
+        condition: service_healthy
+    restart: unless-stopped

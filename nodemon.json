@@ -1,0 +1,7 @@
+{
+  "watch": ["app.js", "public"],
+  "ext": "js,html,css",
+  "ignore": ["baileys_auth/**", "node_modules/**"],
+  "delay": "1200",
+  "legacyWatch": true
+}
