@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Dashboard WhatsApp</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/qr.css" />
+  <style>
+    body { max-width: 1200px; margin: 24px auto; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .card { background:#0f172a; border:1px solid #1f2937; border-radius:12px; padding:16px; flex:1 1 240px; color:#e5e7eb; min-width:200px }
+    .muted { opacity:.75; font-size:.9em }
+    table { width:100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #1f2937; padding:8px; text-align:left; color:#e5e7eb }
+    th { position: sticky; top: 0; background:#0b1220; z-index:1; user-select:none; }
+    th.sortable { cursor:pointer; }
+    .pill { padding:2px 8px; border-radius:999px; font-size:.8em; display:inline-block }
+    .in  { background:#0ea5e9; color:#00111f }
+    .out { background:#34d399; color:#002012 }
+    .fail{ background:#f87171; color:#2a0a0a }
+    .toolbar { display:flex; gap:8px; align-items:center; margin: 12px 0; flex-wrap: wrap; }
+    input, select, button, a.btn { padding:8px 10px; border-radius:8px; border:1px solid #334155; background:#0b1220; color:#e5e7eb; text-decoration:none }
+    button, a.btn { cursor:pointer; }
+    .charts { display:grid; grid-template-columns: 1fr; gap:16px; margin: 16px 0; }
+    @media (min-width: 900px) { .charts { grid-template-columns: 1fr 1fr; } }
+    .chart-card { background:#0f172a; border:1px solid #1f2937; border-radius:12px; padding:16px; position:relative; }
+    .chart-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    .card-actions { display:flex; gap:6px; }
+    .mini { padding:4px 8px; font-size:.85em }
+    .chart-body.hidden { display:none !important; }
+    .hidden { display:none !important; }
+    .chart-card.expanded { position: fixed; inset: 5% 5%; z-index: 9999; background:#0f172a; box-shadow:0 10px 30px rgba(0,0,0,.6); display:flex; flex-direction:column; }
+    .chart-card.expanded .chart-body { flex:1; }
+    .backdrop { position: fixed; inset:0; background: rgba(0,0,0,.45); z-index: 9998; }
+    .pager { display:flex; gap:8px; align-items:center; justify-content:flex-end; margin:12px 0; flex-wrap:wrap; }
+    .pager .muted { margin-right:auto; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1 style="color:#e5e7eb">Dashboard WhatsApp</h1>
+
+  <div class="row">
+    <div class="card"><div class="muted">Enviados</div><div id="k-sent" style="font-size:28px">—</div></div>
+    <div class="card"><div class="muted">Recibidos</div><div id="k-in" style="font-size:28px">—</div></div>
+    <div class="card"><div class="muted">Fallidos</div><div id="k-failed" style="font-size:28px">—</div></div>
+    <div class="card"><div class="muted">Números únicos</div><div id="k-uniq" style="font-size:28px">—</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input id="f-text" placeholder="Buscar texto o número…" />
+    <select id="f-type">
+      <option value="">Todos</option>
+      <option value="in">Entrantes</option>
+      <option value="out">Salientes</option>
+    </select>
+
+    <label class="muted">Límite</label>
+    <select id="f-limit">
+      <option>300</option>
+      <option selected>500</option>
+      <option>1000</option>
+      <option>2000</option>
+    </select>
+
+    <button id="b-refresh">Actualizar</button>
+    <a id="b-csv" class="btn" href="/api/events.csv?limit=1000">⬇ Descargar CSV</a>
+    <button id="toggle-charts">Mostrar gráficas</button>
+    <button id="b-clear" title="Borrar log">🗑 Borrar</button>
+  </div>
+
+  <div id="charts-backdrop" class="backdrop hidden"></div>
+
+  <div id="charts-wrap" class="charts hidden">
+    <div class="chart-card" id="card-volume">
+      <div class="chart-header">
+        <div class="muted">Volumen por hora (últimos N eventos)</div>
+        <div class="card-actions">
+          <button class="mini" data-action="toggle-collapse" data-target="volume">▾ Ocultar</button>
+          <button class="mini" data-action="toggle-expand" data-target="volume">⤢ Expandir</button>
+        </div>
+      </div>
+      <div class="chart-body" id="card-body-volume">
+        <canvas id="volumeChart" height="140"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card" id="card-status">
+      <div class="chart-header">
+        <div class="muted">Éxito de envíos</div>
+        <div class="card-actions">
+          <button class="mini" data-action="toggle-collapse" data-target="status">▾ Ocultar</button>
+          <button class="mini" data-action="toggle-expand" data-target="status">⤢ Expandir</button>
+        </div>
+      </div>
+      <div class="chart-body" id="card-body-status">
+        <canvas id="statusChart" height="140"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controles de paginación -->
+  <div class="pager">
+    <span class="muted" id="pager-info">—</span>
+    <label class="muted">Filas por página</label>
+    <select id="page-size">
+      <option>25</option>
+      <option selected>50</option>
+      <option>100</option>
+    </select>
+    <button id="page-prev">⟨ Anterior</button>
+    <span id="page-pos">Página 1/1</span>
+    <button id="page-next">Siguiente ⟩</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:180px" id="th-fecha" class="sortable">Fecha <span id="sort-ind">▼</span></th>
+        <th style="width:100px">Tipo</th>
+        <th style="width:150px">Número</th>
+        <th>Texto</th>
+        <th style="width:130px">Plantilla</th>
+        <th style="width:120px">Estado</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <script src="/dashboard.js"></script>
+</body>
+</html>

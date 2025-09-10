@@ -28,12 +28,14 @@ services:
       - PHP_ENDPOINT=http://php/chat-bot/index.php
       - PHP_TIMEOUT_MS=8000
       - SEND_RATE_MS=800
+      - LOG_DIR=/usr/src/app/data
     ports:
       - "3000:3000"
     volumes:
       - ./app.js:/usr/src/app/app.js
       - ./public:/usr/src/app/public
       - ./baileys_auth:/usr/src/app/baileys_auth
+      - ./data:/usr/src/app/data
     depends_on:
       php:
         condition: service_healthy

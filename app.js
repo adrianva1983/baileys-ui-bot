@@ -16,6 +16,38 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || path.join(__dirname, "baileys_auth"))
 console.log("[Auth]", AUTH_DIR)
 
+// ==== LOG (eventos enviados/recibidos) ====
+const LOG_DIR = path.resolve(process.env.LOG_DIR || path.join(__dirname, "data"))
+const LOG_FILE = path.join(LOG_DIR, "events.ndjson")
+
+function ensureLogDir() { try { fs.mkdirSync(LOG_DIR, { recursive: true }) } catch {} }
+ensureLogDir()
+
+function logEvent(ev = {}) {
+  const ts = Date.now()
+  const row = JSON.stringify({ ts, iso: new Date(ts).toISOString(), ...ev }) + "\n"
+  try { fs.appendFileSync(LOG_FILE, row, "utf8") } catch (e) { console.warn("[logEvent] no se pudo escribir:", e.message) }
+
+  // 👇 NUEVO: marca último TS y notifica por SSE a los dashboards conectados
+  LAST_EVENT_TS = ts
+  dashBroadcast('new', { ts })
+}
+
+function readEvents({ limit = 500, since = 0 } = {}) {
+  try {
+    const txt = fs.readFileSync(LOG_FILE, "utf8")
+    const lines = txt.split("\n").filter(Boolean)
+    const out = []
+    for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+      try {
+        const obj = JSON.parse(lines[i])
+        if (!since || obj.ts >= since) out.push(obj)
+      } catch {}
+    }
+    return out.reverse()
+  } catch { return [] }
+}
+
 let sock = null
 let connectPromise = null
 
@@ -24,6 +56,17 @@ let connectionStatus = "init" // init | waiting-qr | open-but-not-linked | conne
 let lastError = null
 let meId = null
 let meName = null
+
+// ---- Notificaciones SSE (dashboard) ----
+let LAST_EVENT_TS = 0
+const dashClients = new Set()
+
+function dashBroadcast(type, payload) {
+  const str = JSON.stringify(payload || {})
+  for (const res of dashClients) {
+    try { res.write(`event: ${type}\ndata: ${str}\n\n`) } catch {}
+  }
+}
 
 // ---------- Utiles ----------
 function jidToNumber(jid = "") { return jid.split("@")[0] || "" }
@@ -74,10 +117,7 @@ function getQuoted(msg) {
     qm.imageMessage?.caption ||
     qm.videoMessage?.caption ||
     ""
-  return clean({
-    type,
-    text: text || undefined,
-  })
+  return clean({ type, text: text || undefined })
 }
 function getMediaFlags(msg) {
   const m = msg?.message || {}
@@ -94,7 +134,6 @@ function getMediaFlags(msg) {
   })
 }
 function tsToISO(ts) {
-  // Baileys suele dar segundos
   const n = Number(ts || 0)
   return n ? new Date((n < 10_000_000_000 ? n * 1000 : n)).toISOString() : undefined
 }
@@ -118,7 +157,7 @@ function summarizeMessage(msg) {
   const isGroup = remote.endsWith("@g.us")
   const text = getTextFromMessage(msg).trim()
   const msgType = getMessageType(msg)
-  const summary = clean({
+  return clean({
     chatType: isGroup ? "group" : "private",
     id: msg.key.id,
     timestamp: tsToISO(msg.messageTimestamp || msg.timestamp),
@@ -133,13 +172,12 @@ function summarizeMessage(msg) {
     quoted: getQuoted(msg),
     media: getMediaFlags(msg),
   })
-  return summary
 }
 
 // Llama a tu endpoint PHP y devuelve un texto para responder (POST normal)
 async function getReplyFromPHP({ fromNumber, text, jid }) {
-  const PHP_ENDPOINT = "http://php/chat-bot/index.php" // o /chat-bot/index.php
-  const SECRET = "cambia-este-secreto"
+  const PHP_ENDPOINT = process.env.PHP_ENDPOINT || "http://php/whatsapp.php"
+  const SECRET = process.env.PHP_SECRET || "cambia-este-secreto"
   const form = new URLSearchParams({ secret: SECRET, fromNumber, text, jid })
 
   async function once(url = PHP_ENDPOINT) {
@@ -148,7 +186,7 @@ async function getReplyFromPHP({ fromNumber, text, jid }) {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Accept": "application/json",
-        "Connection": "close", // evita reusar sockets que Apache ya cerró
+        "Connection": "close",
       },
       body: form.toString(),
     })
@@ -162,9 +200,8 @@ async function getReplyFromPHP({ fromNumber, text, jid }) {
     return replyText
   }
 
-  try {
-    return await once()
-  } catch (e) {
+  try { return await once() }
+  catch (e) {
     if (e?.name === "AbortError" || /aborted|ECONNRESET|socket hang up/i.test(String(e))) {
       return await once(`${PHP_ENDPOINT}?_=${Date.now()}`)
     }
@@ -197,19 +234,29 @@ async function connectToWhatsApp() {
 
         if (summary.chatType === "private") {
           console.dir(summary, { depth: null, colors: true })
-          //if (summary.from?.number === "34644550262") {
-            // Llamada a tu PHP (⚠️ asegúrate de haber definido PHP_ENDPOINT)
+
+          // Log ENTRANTE
+          logEvent({
+            type: "in",
+            number: summary.from?.number,
+            name: summary.from?.name || null,
+            text: summary.text || "",
+            msgType: summary.msgType,
+          })
+
+          if (summary.from?.number === "34644619636") {
             const replyText = await getReplyFromPHP({
               fromNumber: summary.from.number,
               text: summary.text || "",
               jid: numberToJid(summary.from.number),
               raw: summary,
             })
-
-            // Enviar la respuesta devuelta por PHP
             await sock.sendMessage(numberToJid(summary.from.number), { text: replyText })
             console.log("↩️ Respuesta enviada:", replyText)
-          //}
+
+            // Log SALIENTE auto
+            logEvent({ type: "out", to: summary.from.number, text: replyText, source: "auto", ok: true })
+          }
         }
 
         // envía a la UI (último mensaje)
@@ -221,8 +268,6 @@ async function connectToWhatsApp() {
         }
         broadcastMsgSSE(payload)
 
-        // ❌ No marcar como leído
-        // await sock.readMessages([msg.key])
       } catch (e) {
         console.error("Error en messages.upsert:", e)
       }
@@ -240,14 +285,10 @@ async function connectToWhatsApp() {
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update
 
-      // 👉 NO generes/actualices QR si ya estás conectado
       if (qr && connectionStatus !== "connected") {
         connectionStatus = "waiting-qr"
         qrcode.toDataURL(qr, (err, url) => {
-          if (!err) {
-            latestQR = url
-            broadcastSSE()
-          }
+          if (!err) { latestQR = url; broadcastSSE() }
         })
       }
 
@@ -258,7 +299,7 @@ async function connectToWhatsApp() {
           connectionStatus = "connected"
           lastError = null
           console.log("✅ Vinculado como:", meId)
-          latestQR = null // ocultar QR en UI
+          latestQR = null
           broadcastSSE()
         } else {
           connectionStatus = "open-but-not-linked"
@@ -270,7 +311,6 @@ async function connectToWhatsApp() {
         const errMsg = String(lastDisconnect?.error?.message || "")
         const status = lastDisconnect?.error?.output?.statusCode
 
-        // Caso especial: agotó intentos de QR — reiniciar socket
         if (errMsg.includes("QR refs attempts ended")) {
           console.warn("⚠️ Intentos de QR agotados. Reiniciando socket...")
           try { sock?.end?.(true) } catch {}
@@ -318,7 +358,7 @@ app.get("/qr-events", async (req, res) => {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no"
   })
-  res.write("retry: 5000\n\n") // si se corta, reintenta en 5s
+  res.write("retry: 5000\n\n")
 
   sseClients.add(res)
   req.on("close", () => { clearInterval(ka); sseClients.delete(res) })
@@ -332,6 +372,29 @@ app.get("/qr-events", async (req, res) => {
     catch { clearInterval(ka); sseClients.delete(res) }
   }, 15000)
 })
+// ---- SSE para dashboard: empuja "new" cuando hay eventos nuevos ----
+app.get("/events-stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
+  })
+  res.write("retry: 5000\n\n")
+
+  dashClients.add(res)
+  req.on("close", () => { clearInterval(ka); dashClients.delete(res) })
+
+  // Estado inicial: manda el último TS conocido
+  res.write(`event: init\ndata: ${JSON.stringify({ lastTs: LAST_EVENT_TS })}\n\n`)
+
+  // keep-alive
+  const ka = setInterval(() => {
+    try { res.write(`event: ping\ndata: ${Date.now()}\n\n`) }
+    catch { clearInterval(ka); dashClients.delete(res) }
+  }, 15000)
+})
+
 
 function sendSSE(res) {
   res.write(`event: update\ndata: ${JSON.stringify({ latestQR, connectionStatus, lastError, meId, meName })}\n\n`)
@@ -352,15 +415,16 @@ app.post("/send-test", async (req, res) => {
     if (!jid) return res.status(400).json({ ok: false, msg: "Número inválido" })
 
     await sock.sendMessage(jid, { text })
+    logEvent({ type: "out", to: jidToNumber(jid), text, source: "send-test", ok: true })
     return res.json({ ok: true })
   } catch (e) {
+    try { logEvent({ type: "out", to: (req.body?.to||""), text: (req.body?.text||""), source: "send-test", ok: false, error: e?.message || String(e) }) } catch {}
     return res.status(500).json({ ok: false, msg: e?.message || String(e) })
   }
 })
 
 // items: [{ to, text }]  o  [{ to, template:"hipotea", nombre, tuNombre, origen, url }]
 async function sendBatchFromArray(items = []) {
-  // usa el estado real de Baileys
   if (!sock || !sock.user) throw new Error("No conectado a WhatsApp")
   if (!Array.isArray(items) || items.length === 0) return { ok: true, total: 0, results: [] }
 
@@ -372,13 +436,15 @@ async function sendBatchFromArray(items = []) {
       if (!jid) throw new Error("Número inválido")
 
       const payload = item.template === "hipotea"
-        ? { text: `Hola ${item.nombre || "Cliente"} — ${item.url || ""}` } // o tu plantilla real
-        : { text: String(item.text || "Mensaje de prueba ✅") }
+        ? { text: `Hola ${item.nombre || "Cliente"} — ${item.url || ""}` }
+        : { text: String(item.text || "Mensaje de prueba1 ✅") }
 
       await sock.sendMessage(jid, payload)
+      logEvent({ type: "out", to: jidToNumber(jid), text: payload.text || null, template: item.template || null, source: "batch", ok: true })
       console.log(`[BATCH] OK -> ${jid}`)
       results.push({ to: item.to, ok: true })
     } catch (e) {
+      logEvent({ type: "out", to: item?.to || null, text: item?.text || null, template: item?.template || null, source: "batch", ok: false, error: e?.message || String(e) })
       console.error(`[BATCH] ERROR con ${item?.to}:`, e?.message || e)
       results.push({ to: item?.to || null, ok: false, error: e?.message || String(e) })
     }
@@ -403,7 +469,7 @@ app.post("/send-batch", async (req, res) => {
 app.get("/send-batch-demo", async (_req, res) => {
   try {
     const demo = [
-      { to: "34644550262", text: "Mensaje de prueba ✅" }
+      { to: "34644619636", text: "Mensaje de prueba2 ✅" }
     ]
     const r = await sendBatchFromArray(demo)
     res.json(r)
@@ -418,17 +484,14 @@ async function safeDisconnect() {
     connectionStatus = "logging-out"
     broadcastSSE()
 
-    // 1) corta listeners y socket
     try { sock?.ev?.removeAllListeners?.() } catch {}
     try { await sock?.logout?.() } catch {}
     try { sock?.end?.(true) } catch {}
     sock = null
     connectPromise = null
 
-    // 2) pequeña pausa para liberar handles
     await new Promise(r => setTimeout(r, 200))
 
-    // 3) borra y recrea la carpeta REAL de credenciales
     try {
       await fs.promises.rm(AUTH_DIR, { recursive: true, force: true })
       await fs.promises.mkdir(AUTH_DIR, { recursive: true })
@@ -437,14 +500,12 @@ async function safeDisconnect() {
       console.warn("[Auth] no se pudo limpiar:", e?.message || e)
     }
 
-    // 4) resetea estado UI
     latestQR = null
     meId = null
     meName = null
     connectionStatus = "logged-out"
     broadcastSSE()
 
-    // 5) reconecta (pedirá QR nuevo)
     await connectToWhatsApp()
     return { ok: true }
   } catch (e) {
@@ -461,7 +522,66 @@ app.post("/logout", async (_req, res) => {
   else res.status(500).json(r)
 })
 
-// (Opcional) Diagnóstico de ruta real de credenciales
+// === API Dashboard ===
+app.get("/api/events", (req, res) => {
+  const limit = Math.min(1000, Math.max(1, Number(req.query.limit || 300)))
+  const since = Number(req.query.since || 0)
+  res.json({ ok: true, items: readEvents({ limit, since }) })
+})
+app.get("/api/stats", (_req, res) => {
+  const items = readEvents({ limit: 1000 })
+  const stats = {
+    total: items.length,
+    sent: items.filter(x => x.type === "out").length,
+    received: items.filter(x => x.type === "in").length,
+    failed: items.filter(x => x.type === "out" && !x.ok).length,
+    uniqueNumbers: new Set(items.map(x => x.number || x.to).filter(Boolean)).size,
+    lastTs: items.at(-1)?.ts || null,
+  }
+  res.json({ ok: true, stats })
+})
+// GET /api/events.csv?limit=1000&since=1690000000000
+app.get("/api/events.csv", (req, res) => {
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 1000)))
+  const since = Number(req.query.since || 0)
+  const items = readEvents({ limit, since })
+
+  // CSV helpers
+  const esc = (v) => {
+    if (v === null || v === undefined) return '""'
+    const s = String(v).replace(/"/g, '""')
+    return `"${s}"`
+  }
+
+  const header = [
+    "ts","iso","type","number","name","text","template","source","ok","error"
+  ].join(",")
+
+  const rows = items.map(x => ([
+    x.ts,
+    x.iso,
+    x.type || "",
+    x.number || x.to || "",
+    x.name || "",
+    x.text || "",
+    x.template || "",
+    x.source || "",
+    (typeof x.ok === "boolean" ? x.ok : ""),
+    x.error || ""
+  ].map(esc).join(",")))
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8")
+  const filename = `events-${new Date().toISOString().replace(/[:.]/g,"").slice(0,15)}.csv`
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+  res.send([header, ...rows].join("\n"))
+})
+
+app.delete("/api/events", async (_req, res) => {
+  try { await fs.promises.rm(LOG_FILE, { force: true }); ensureLogDir(); res.json({ ok: true }) }
+  catch (e) { res.status(500).json({ ok: false, msg: e?.message || String(e) }) }
+})
+
+// (Diagnóstico) ruta real de credenciales
 app.get("/auth-path", async (_req, res) => {
   let exists = false, files = []
   try { exists = fs.existsSync(AUTH_DIR); files = exists ? fs.readdirSync(AUTH_DIR) : [] } catch {}
