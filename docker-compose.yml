@@ -6,6 +6,8 @@ services:
       - ./php:/var/www/html
     ports:
       - "8080:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # clave para Linux/Win/Mac con Docker 20.10+
     environment:
       - APACHE_DOCUMENT_ROOT=/var/www/html
     healthcheck:

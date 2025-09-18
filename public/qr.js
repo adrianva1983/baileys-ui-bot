@@ -160,7 +160,15 @@ if (testSendBtn) {
 
 // SSE: estado y mensajes
 const ev = new EventSource('/qr-events')
-ev.addEventListener('update', (e) => { try { applyPayload(JSON.parse(e.data)) } catch {} })
+ev.addEventListener('update', (e) => {
+  try {
+    const payload = JSON.parse(e.data)
+    applyPayload(payload)
+    if (payload.connectionStatus === 'connected' && window.location.pathname !== '/dashboard.html') {
+      window.location.href = '/dashboard.html'
+    }
+  } catch {}
+})
 ev.addEventListener('msg', (e) => {
   try {
     const d = JSON.parse(e.data) || {}

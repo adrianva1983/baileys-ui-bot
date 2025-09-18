@@ -254,3 +254,25 @@ function connectEventsStream() {
 }
 
 connectEventsStream()
+
+// === Logout WhatsApp ===
+const logoutBtn = document.querySelector('#b-logout')
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    if (!confirm('¿Cerrar la sesión de WhatsApp y borrar credenciales (baileys_auth)?')) return
+    try {
+      const res = await fetch('/logout', { method: 'POST' })
+      const j = await res.json().catch(()=>({}))
+      if (res.ok && j.ok) {
+        // El servidor ya borra AUTH_DIR (baileys_auth) y reinicia el flujo de QR:contentReference[oaicite:4]{index=4}
+        alert(j.msg || 'Sesión cerrada. Redirigiendo al QR…')
+        window.location.href = '/qr.html'
+      } else {
+        alert(j.msg || 'No se pudo cerrar la sesión')
+      }
+    } catch {
+      alert('Error de red al cerrar sesión')
+    }
+  })
+}
+

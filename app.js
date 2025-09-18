@@ -1,5 +1,9 @@
 // app.js
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys"
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
+} from "@whiskeysockets/baileys"
 import qrcode from "qrcode"
 import express from "express"
 import fs from "fs"
@@ -28,7 +32,7 @@ function logEvent(ev = {}) {
   const row = JSON.stringify({ ts, iso: new Date(ts).toISOString(), ...ev }) + "\n"
   try { fs.appendFileSync(LOG_FILE, row, "utf8") } catch (e) { console.warn("[logEvent] no se pudo escribir:", e.message) }
 
-  // 👇 NUEVO: marca último TS y notifica por SSE a los dashboards conectados
+  // 👇 marca último TS y notifica por SSE a los dashboards conectados
   LAST_EVENT_TS = ts
   dashBroadcast('new', { ts })
 }
@@ -174,6 +178,55 @@ function summarizeMessage(msg) {
   })
 }
 
+// --- Helpers robustos para borrar AUTH_DIR --- //
+async function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)) }
+async function pathExists(p){ try { await fs.promises.access(p); return true } catch { return false } }
+async function rmRecursive(dir, tries=5){
+  let lastErr = null
+  for (let i=0;i<tries;i++){
+    try {
+      await fs.promises.rm(dir, { recursive:true, force:true })
+      if (!(await pathExists(dir))) return { ok:true }
+    } catch(e){ lastErr = e }
+    await sleepMs(200*(i+1))
+  }
+  return { ok:false, err:lastErr }
+}
+async function deleteContentsIndividually(dir){
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes:true })
+    for (const e of entries){
+      const p = path.join(dir, e.name)
+      try {
+        if (e.isDirectory()) await fs.promises.rm(p, { recursive:true, force:true })
+        else await fs.promises.unlink(p)
+      } catch {}
+    }
+    await fs.promises.rmdir(dir).catch(()=>{})
+  } catch {}
+}
+async function nukeAuthDir(){
+  const dir = AUTH_DIR
+  const exists = await pathExists(dir)
+  if (!exists) return { ok:true, step:"skip", msg:"AUTH_DIR no existe" }
+  const tomb = `${dir}.old-${Date.now()}`
+  try { await fs.promises.rename(dir, tomb) }
+  catch (e) {
+    const r1 = await rmRecursive(dir, 6)
+    if (r1.ok) return { ok:true, step:"rm-direct" }
+    await deleteContentsIndividually(dir)
+    const left = await pathExists(dir)
+    return left ? { ok:false, step:"rm-direct-fallback", err:"No se pudo borrar AUTH_DIR" }
+                : { ok:true, step:"rm-direct-fallback" }
+  }
+  const r2 = await rmRecursive(tomb, 6)
+  if (r2.ok) return { ok:true, step:"rm-renamed" }
+  await deleteContentsIndividually(tomb)
+  const left = await pathExists(tomb)
+  return left ? { ok:false, step:"rm-renamed-fallback", err:"No se pudo borrar AUTH_DIR renombrado" }
+              : { ok:true, step:"rm-renamed-fallback" }
+}
+
 // Llama a tu endpoint PHP y devuelve un texto para responder (POST normal)
 async function getReplyFromPHP({ fromNumber, text, jid }) {
   const PHP_ENDPOINT = process.env.PHP_ENDPOINT || "http://php/whatsapp.php"
@@ -214,7 +267,18 @@ async function connectToWhatsApp() {
   if (connectPromise) return connectPromise
   connectPromise = (async () => {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
-    sock = makeWASocket({ auth: state })
+    const { version } = await fetchLatestBaileysVersion().catch(()=>({ version: undefined }))
+    sock = makeWASocket({
+      auth: state,
+      version,
+      browser: ["Chrome","Windows","10"],
+      printQRInTerminal: false,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      connectTimeoutMs: 45_000,
+      keepAliveIntervalMs: 25_000,
+      emitOwnEvents: false
+    })
 
     // Mensajes entrantes → consola y SSE (NO leídos)
     sock.ev.on("messages.upsert", async (event) => {
@@ -276,8 +340,8 @@ async function connectToWhatsApp() {
     // Persistencia de credenciales / datos de usuario
     sock.ev.on("creds.update", async () => {
       await saveCreds()
-      meId = state?.creds?.me?.id || null
-      meName = state?.creds?.me?.name || null
+      meId = state?.creds?.me?.id || sock?.user?.id || null
+      meName = state?.creds?.me?.name || sock?.user?.name || null
       broadcastSSE()
     })
 
@@ -293,8 +357,8 @@ async function connectToWhatsApp() {
       }
 
       if (connection === "open") {
-        meId = state?.creds?.me?.id || sock?.user?.id || null
-        meName = state?.creds?.me?.name || sock?.user?.name || null
+        meId = meId || state?.creds?.me?.id || sock?.user?.id || null
+        meName = meName || state?.creds?.me?.name || sock?.user?.name || null
         if (meId) {
           connectionStatus = "connected"
           lastError = null
@@ -311,23 +375,17 @@ async function connectToWhatsApp() {
         const errMsg = String(lastDisconnect?.error?.message || "")
         const status = lastDisconnect?.error?.output?.statusCode
 
-        if (errMsg.includes("QR refs attempts ended")) {
-          console.warn("⚠️ Intentos de QR agotados. Reiniciando socket...")
-          try { sock?.end?.(true) } catch {}
-          sock = null
-          connectionStatus = "waiting-qr"
-          broadcastSSE()
-          setTimeout(() => {
-            connectToWhatsApp().catch(e => {
-              lastError = e?.message || String(e)
-              connectionStatus = "closed"
-              broadcastSSE()
-            })
-          }, 750)
+        const isQRExhausted = /QR refs attempts ended/i.test(errMsg)
+        const isLoggedOut = status === DisconnectReason.loggedOut
+
+        if (isQRExhausted || isLoggedOut) {
+          console.warn("⚠️ Sesión inválida / intentos de QR agotados. Reiniciando credenciales…")
+          // No esperes al recolector; fuerza un logout limpio
+          safeDisconnect().then(()=>{}).catch(()=>{})
           return
         }
 
-        const shouldReconnect = status !== DisconnectReason.loggedOut
+        const shouldReconnect = !isLoggedOut && !isQRExhausted
         lastError = lastDisconnect?.error?.message || null
         connectionStatus = shouldReconnect ? "reconnecting" : "logged-out"
         broadcastSSE()
@@ -394,7 +452,6 @@ app.get("/events-stream", (req, res) => {
     catch { clearInterval(ka); dashClients.delete(res) }
   }, 15000)
 })
-
 
 function sendSSE(res) {
   res.write(`event: update\ndata: ${JSON.stringify({ latestQR, connectionStatus, lastError, meId, meName })}\n\n`)
@@ -479,35 +536,47 @@ app.get("/send-batch-demo", async (_req, res) => {
 })
 
 // ---------- Logout en caliente (sin tumbar Node) ----------
+// Cierra sesión, corta sockets, borra AUTH_DIR y vuelve a iniciar para generar QR
 async function safeDisconnect() {
   try {
     connectionStatus = "logging-out"
     broadcastSSE()
 
+    // 1) Quitar listeners y cerrar sesión/socket
     try { sock?.ev?.removeAllListeners?.() } catch {}
     try { await sock?.logout?.() } catch {}
     try { sock?.end?.(true) } catch {}
     sock = null
     connectPromise = null
 
-    await new Promise(r => setTimeout(r, 200))
+    // 2) Pequeña espera para liberar descriptores de fichero
+    await sleepMs(600)
 
-    try {
-      await fs.promises.rm(AUTH_DIR, { recursive: true, force: true })
-      await fs.promises.mkdir(AUTH_DIR, { recursive: true })
-      console.log("[Auth] limpiada:", AUTH_DIR)
-    } catch (e) {
-      console.warn("[Auth] no se pudo limpiar:", e?.message || e)
+    // 3) Borrar AUTH_DIR con rutina robusta
+    const nuke = await nukeAuthDir()
+    if (!nuke.ok) {
+      console.warn("[Auth] nukeAuthDir falló:", nuke.err || nuke)
+      throw new Error(`No se pudo borrar AUTH_DIR (paso: ${nuke.step || 'unknown'})`)
+    }
+    console.log("[Auth] limpiada:", AUTH_DIR, `(modo: ${nuke.step})`)
+
+    // 4) Recrea carpeta para el siguiente login limpio
+    try { await fs.promises.mkdir(AUTH_DIR, { recursive:true }) } catch (e) {
+      console.warn("[Auth] no se pudo recrear AUTH_DIR:", e?.message || e)
     }
 
+    // 5) Reset de estado y notificación
     latestQR = null
     meId = null
     meName = null
+    lastError = null
     connectionStatus = "logged-out"
     broadcastSSE()
 
+    // 6) Reconectar para generar QR nuevo
     await connectToWhatsApp()
-    return { ok: true }
+
+    return { ok: true, removed:true }
   } catch (e) {
     lastError = e?.message || String(e)
     connectionStatus = "closed"
@@ -518,7 +587,7 @@ async function safeDisconnect() {
 
 app.post("/logout", async (_req, res) => {
   const r = await safeDisconnect()
-  if (r.ok) res.status(200).json({ ok: true, msg: "Sesión cerrada. Generando nuevo QR..." })
+  if (r.ok) res.status(200).json({ ok: true, msg: "Sesión cerrada. Generando nuevo QR...", removed: !!r.removed, authPath: AUTH_DIR })
   else res.status(500).json(r)
 })
 
@@ -588,8 +657,14 @@ app.get("/auth-path", async (_req, res) => {
   res.json({ AUTH_DIR, exists, files })
 })
 
-// Raíz
-app.get("/", (_req, res) => res.redirect("/qr.html"))
+// Raíz: si conectado → dashboard; si no → QR
+app.get("/", (_req, res) => {
+  if (connectionStatus === "connected") {
+    return res.redirect("/dashboard.html")
+  } else {
+    return res.redirect("/qr.html")
+  }
+})
 
 app.listen(3000, () => console.log("🌐 UI en http://localhost:3000/qr.html"))
 
