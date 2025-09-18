@@ -1,20 +1,21 @@
-const $ = (s)=>document.querySelector(s)
+// Puedes seguir usando vanilla; jQuery ya está disponible por si lo prefieres.
+const $q = (s)=>document.querySelector(s)
 const fmt = ts => new Date(ts).toLocaleString()
 
 let volumeChart, statusChart
 let __items = []
 
 // estado UI
-const chartsWrap = $('#charts-wrap')
-const chartsBackdrop = $('#charts-backdrop')
-const toggleChartsBtn = $('#toggle-charts')
+const chartsWrap = $q('#charts-wrap')
+const chartsBackdrop = $q('#charts-backdrop')
+const toggleChartsBtn = $q('#toggle-charts')
 
 // paginación + orden
 let state = {
   sortBy: 'ts',
-  sortDir: 'desc', // default: más nuevo -> más viejo
+  sortDir: 'desc', // más nuevo -> más viejo (por defecto)
   page: 1,
-  pageSize: Number($('#page-size').value || 50),
+  pageSize: Number($q('#page-size').value || 50),
 }
 
 const LS_KEY = 'chartsVisible'
@@ -26,18 +27,19 @@ function setChartsVisible(v) {
 }
 setChartsVisible(localStorage.getItem(LS_KEY) === '1')
 
-toggleChartsBtn.onclick = () => {
+// Toggle global de gráficas (Bootstrap no es necesario aquí)
+toggleChartsBtn.addEventListener('click', () => {
   const nowVisible = chartsWrap.classList.contains('hidden')
   setChartsVisible(nowVisible)
-}
+})
 
 async function fetchStats(limit) {
   const r = await fetch('/api/stats'); const j = await r.json().catch(()=>({}))
   if (!j.ok) return
-  $('#k-sent').textContent = j.stats.sent
-  $('#k-in').textContent = j.stats.received
-  $('#k-failed').textContent = j.stats.failed
-  $('#k-uniq').textContent = j.stats.uniqueNumbers
+  $q('#k-sent').textContent = j.stats.sent
+  $q('#k-in').textContent = j.stats.received
+  $q('#k-failed').textContent = j.stats.failed
+  $q('#k-uniq').textContent = j.stats.uniqueNumbers
 }
 
 async function fetchEvents(limit) {
@@ -48,14 +50,12 @@ async function fetchEvents(limit) {
 }
 
 function applyFiltersAndSort(items) {
-  const q = ($('#f-text').value||'').toLowerCase().trim()
-  const t = $('#f-type').value
-  // filtrar
+  const q = ($q('#f-text').value||'').toLowerCase().trim()
+  const t = $q('#f-type').value
   let res = items.filter(x =>
     (!t || x.type===t) &&
     (!q || (x.text||'').toLowerCase().includes(q) || (x.number||x.to||'').includes(q))
   )
-  // ordenar
   res.sort((a,b)=>{
     const dir = state.sortDir === 'asc' ? 1 : -1
     const av = a[state.sortBy] ?? 0
@@ -68,7 +68,6 @@ function applyFiltersAndSort(items) {
 }
 
 function renderTablePage(items) {
-  // paginar
   const total = items.length
   const pageSize = state.pageSize
   const pages = Math.max(1, Math.ceil(total / pageSize))
@@ -82,8 +81,8 @@ function renderTablePage(items) {
   const rows = slice.map(x=>{
     const numero = x.number || x.to || ''
     const estado = x.type==='out'
-      ? (x.ok ? `<span class="pill out">OK</span>` : `<span class="pill fail">ERROR</span>`)
-      : `<span class="pill in">IN</span>`
+      ? (x.ok ? `<span class="badge text-bg-success">OK</span>` : `<span class="badge text-bg-danger">ERROR</span>`)
+      : `<span class="badge text-bg-info">IN</span>`
     return `<tr>
       <td>${fmt(x.ts)}</td>
       <td>${x.type}</td>
@@ -94,15 +93,13 @@ function renderTablePage(items) {
     </tr>`
   }).join('')
 
-  $('#tbody').innerHTML = rows || `<tr><td colspan="6" class="muted">Sin datos</td></tr>`
+  $q('#tbody').innerHTML = rows || `<tr><td colspan="6" class="text-secondary">Sin datos</td></tr>`
 
-  // info paginación
-  $('#page-pos').textContent = `Página ${state.page} / ${pages}`
-  $('#page-prev').disabled = state.page <= 1
-  $('#page-next').disabled = state.page >= pages
+  $q('#page-pos').textContent = `Página ${state.page} / ${pages}`
+  $q('#page-prev').disabled = state.page <= 1
+  $q('#page-next').disabled = state.page >= pages
 
-  // info total filtrado
-  $('#pager-info').textContent = `${total} resultado(s) filtrado(s)`
+  $q('#pager-info').textContent = `${total} resultado(s) filtrado(s)`
 }
 
 function bucketByHour(items) {
@@ -138,7 +135,7 @@ function buildOrUpdateCharts(items) {
     options: { responsive:true, maintainAspectRatio:false, scales:{ y:{ beginAtZero:true } }, plugins:{ legend:{ position:'bottom' } } }
   }
   if (volumeChart) { volumeChart.data = volCfg.data; volumeChart.update() }
-  else { volumeChart = new Chart($('#volumeChart').getContext('2d'), volCfg) }
+  else { volumeChart = new Chart($q('#volumeChart').getContext('2d'), volCfg) }
 
   const outs = items.filter(x => x.type === 'out')
   const ok = outs.filter(x => x.ok).length
@@ -149,7 +146,7 @@ function buildOrUpdateCharts(items) {
     options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom' } } }
   }
   if (statusChart) { statusChart.data = stCfg.data; statusChart.update() }
-  else { statusChart = new Chart($('#statusChart').getContext('2d'), stCfg) }
+  else { statusChart = new Chart($q('#statusChart').getContext('2d'), stCfg) }
 }
 
 function resizeCharts() {
@@ -158,14 +155,14 @@ function resizeCharts() {
 }
 function resizeChartsSoon() { setTimeout(resizeCharts, 60) }
 
-// acciones tarjetas de gráficas
+// Acciones de tarjetas (ocultar / expandir)
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]')
   if (!btn) return
   const action = btn.dataset.action
   const target = btn.dataset.target
-  const card = document.querySelector(`#card-${target}`)
-  const body = document.querySelector(`#card-body-${target}`)
+  const card = document.querySelector(`#card-${target}`) || btn.closest('.chart-card')
+  const body = document.querySelector(`#card-body-${target}`) || card?.querySelector('.chart-body')
   if (!card || !body) return
 
   if (action === 'toggle-collapse') {
@@ -189,49 +186,46 @@ chartsBackdrop.addEventListener('click', () => {
   resizeChartsSoon()
 })
 
-// ordenar por fecha al clicar el th
-$('#th-fecha').onclick = () => {
+// Ordenar por fecha (asc/desc)
+$q('#th-fecha').addEventListener('click', () => {
   if (state.sortBy !== 'ts') state.sortBy = 'ts'
   state.sortDir = (state.sortDir === 'desc') ? 'asc' : 'desc'
-  $('#sort-ind').textContent = state.sortDir === 'desc' ? '▼' : '▲'
-  // mantén la página actual pero recalcula
+  $q('#sort-ind').textContent = state.sortDir === 'desc' ? '▼' : '▲'
   render()
-}
+})
 
-// eventos UI filtros/paginación
-$('#b-refresh').onclick = refresh
-$('#b-clear').onclick = async ()=>{
+// Filtros y paginación
+$q('#b-refresh').addEventListener('click', refresh)
+$q('#b-clear').addEventListener('click', async ()=>{
   if (!confirm('¿Borrar el log?')) return
   await fetch('/api/events', { method: 'DELETE' })
   state.page = 1
   refresh()
-}
-$('#f-text').oninput = () => { window.clearTimeout(window.__t); window.__t=setTimeout(()=>{ state.page=1; render() },250) }
-$('#f-type').onchange = () => { state.page=1; render() }
-$('#f-limit').onchange = refresh
-$('#page-size').onchange = () => { state.pageSize = Number($('#page-size').value||50); state.page = 1; render() }
-$('#page-prev').onclick = () => { state.page = Math.max(1, state.page-1); render() }
-$('#page-next').onclick = () => { state.page = state.page+1; render() } // límite se corrige en render
+})
+$q('#f-text').addEventListener('input', () => { clearTimeout(window.__t); window.__t=setTimeout(()=>{ state.page=1; render() },250) })
+$q('#f-type').addEventListener('change', () => { state.page=1; render() })
+$q('#f-limit').addEventListener('change', refresh)
+$q('#page-size').addEventListener('change', () => { state.pageSize = Number($q('#page-size').value||50); state.page = 1; render() })
+$q('#page-prev').addEventListener('click', () => { state.page = Math.max(1, state.page-1); render() })
+$q('#page-next').addEventListener('click', () => { state.page = state.page+1; render() })
 
 function render() {
-  // usa el mismo límite para CSV
-  const limit = Number($('#f-limit').value || 500)
-  $('#b-csv').href = `/api/events.csv?limit=${encodeURIComponent(limit)}`
+  const limit = Number($q('#f-limit').value || 500)
+  $q('#b-csv').href = `/api/events.csv?limit=${encodeURIComponent(limit)}`
   const items = applyFiltersAndSort(__items)
   buildOrUpdateCharts(items)
   renderTablePage(items)
 }
 
 async function refresh() {
-  const limit = Number($('#f-limit').value || 500)
+  const limit = Number($q('#f-limit').value || 500)
   await fetchStats(limit)
   __items = await fetchEvents(limit)
-  // por defecto ya mostramos desc; indicador:
-  $('#sort-ind').textContent = state.sortDir === 'desc' ? '▼' : '▲'
+  $q('#sort-ind').textContent = state.sortDir === 'desc' ? '▼' : '▲'
   render()
 }
 
-// === SSE: refresca solo con datos nuevos ===
+// === SSE: refresca SOLO cuando hay nuevos datos ===
 function connectEventsStream() {
   const es = new EventSource('/events-stream')
 
