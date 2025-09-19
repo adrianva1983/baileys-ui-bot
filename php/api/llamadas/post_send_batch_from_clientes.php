@@ -28,7 +28,7 @@ if (!is_array($clientes)) {
 }
 
 // 4) Funciones auxiliares
-function normaliza_movil($raw, $defaultCC = "34") {
+/*function normaliza_movil($raw, $defaultCC = "34") {
     $digits = preg_replace('/\D+/', '', (string)$raw);
     if ($digits === "") return null;
     if (strpos($digits, "00") === 0) $digits = substr($digits, 2);
@@ -37,11 +37,39 @@ function normaliza_movil($raw, $defaultCC = "34") {
     }
     if (strlen($digits) < 10 || strlen($digits) > 15) return null;
     return $digits;
+}*/
+
+function normaliza_movil(string $raw, string $defaultCC = "34"): ?string {
+    $digits = preg_replace('/\D+/', '', $raw);
+    if ($digits === '' ) return null;
+
+    if (strpos($digits, '00') === 0) {
+        $digits = substr($digits, 2);
+    }
+
+    // Si ya empieza por un CC distinto de default y tiene >=10 dígitos, no tocar
+    if (!str_starts_with($digits, $defaultCC) && strlen($digits) >= 10) {
+        // lo dejamos como está
+    } elseif (!str_starts_with($digits, $defaultCC) && strlen($digits) <= 9) {
+        // probablemente nacional: añadir prefijo por defecto
+        $digits = $defaultCC . ltrim($digits, '0');
+    }
+
+    $len = strlen($digits);
+    if ($len < 10 || $len > 15) return null;
+
+    return $digits;
 }
-function plantilla_msg($nombre, $url) {
-    return "Hola {$nombre}, soy del equipo de Hipotea Asesores 👋\n".
-           "Te comparto tu enlace para continuar el proceso cuando te venga bien:\n{$url}\n\n".
-           "Si tienes alguna duda, responde a este WhatsApp y te ayudamos.";
+function plantilla_msg($nombre, $url, $comercial, $origen) {
+    return "Hola {$nombre}, soy {$comercial}, analista de Hipotea Asesores. ".
+           "Hemos recibido tu solicitud desde {$origen} y llevaré personalmente tu caso.\n".
+           "Para poder estudiarlo necesito algunos datos, y tienes dos opciones:\n".
+           "1️⃣ Completar este cuestionario 👉 {$url}. Podrás hacerlo a la hora que mejor te venga ".
+           "y así, cuando te llame, ya tendrás tu estudio hipotecario con ofertas personalizadas. ✅ ".
+           "Te evitas la llamada de recogida de datos y ahorras tiempo.\n".
+           "2️⃣ Si prefieres no rellenarlo, no pasa nada. En unas 24h te llamaré yo para recoger ".
+           "la información directamente.\n".
+           "¡Gracias por tu confianza!";
 }
 
 // 5) Construir items
@@ -49,7 +77,7 @@ $items = [];
 foreach ($clientes as $c) {
     $to = normaliza_movil($c["movil"] ?? "");
     if (!$to) continue;
-    $text = plantilla_msg($c["nombre"] ?? "", $c["url"] ?? "");
+    $text = plantilla_msg($c["nombre"] ?? "", $c["url"] ?? "", $c["comercial"] ?? "", $c["origen"] ?? "");
     $items[] = ["to"=>$to, "text"=>$text];
 }
 if (!$items) {
